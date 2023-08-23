@@ -6,10 +6,16 @@ import time
 
 from django import VERSION
 from django.core.management.base import BaseCommand
+from django.core.cache import cache
 
 from background_task.tasks import tasks, autodiscover
 from background_task.utils import SignalManager
 from compat import close_connection
+
+try:
+    from constance import config as constance_settings
+except ImportError:
+    constance_settings = None
 
 
 logger = logging.getLogger(__name__)
@@ -72,6 +78,18 @@ class Command(BaseCommand):
         super(Command, self).__init__(*args, **kwargs)
         self._tasks = tasks
 
+    def is_blocked(self):
+        if constance_settings is None:
+            return False
+        
+        val = cache.get("BLOCK_PROCESS_TASKS_value")
+        
+        if val is None:
+            val = getattr(constance_settings, "BLOCK_PROCESS_TASKS", False)
+            cache.set("BLOCK_PROCESS_TASKS_value", val, timeout=10)
+
+        return val
+
     def handle(self, *args, **options):
         duration = options.pop('duration', 0)
         sleep = options.pop('sleep', 5.0)
@@ -91,7 +109,12 @@ class Command(BaseCommand):
                 # shutting down gracefully
                 break
 
-            if not self._tasks.run_next_task(queue):
+            if self.is_blocked():
+                # blocked from settings
+                close_connection()
+                logger.debug('blocked by constance value')
+                time.sleep(sleep)
+            elif not self._tasks.run_next_task(queue):
                 # there were no tasks in the queue, let's recover.
                 close_connection()
                 logger.debug('waiting for tasks')
